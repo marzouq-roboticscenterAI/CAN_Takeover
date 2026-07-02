@@ -17,14 +17,17 @@
 #include "ArduinoGraphics.h"
 #include "Arduino_LED_Matrix.h"
 
-#define SVC_UUID "9a1e0001-1b2c-4f3d-8e5a-0123456789ab"
-#define CHR_UUID "9a1e0002-1b2c-4f3d-8e5a-0123456789ab"
+#define SVC_UUID    "9a1e0001-1b2c-4f3d-8e5a-0123456789ab"
+#define CHR_UUID    "9a1e0002-1b2c-4f3d-8e5a-0123456789ab"   // laptop -> R4 (input tokens)
+#define STATUS_UUID "9a1e0003-1b2c-4f3d-8e5a-0123456789ab"   // R4 -> laptop (game status)
 
 ArduinoLEDMatrix matrix;
 BLEService        snakeSvc(SVC_UUID);
 BLECharacteristic inputChar(CHR_UUID, BLEWrite | BLEWriteWithoutResponse, 20);
+BLECharacteristic statusChar(STATUS_UUID, BLERead | BLENotify, 16);
 
 bool linked = false;
+unsigned long lastStatus = 0;
 
 const int W = 12, H = 8;
 const int MAXLEN = W * H;
@@ -126,6 +129,25 @@ void handleToken(const char *tok) {
   }
 }
 
+// Publish game status: [state, score, foodCol, foodRow, 12-byte snake bitmap]
+// bitmap bit index = row*W + col (96 cells -> 12 bytes).
+void updateStatus() {
+  uint8_t buf[16];
+  buf[0] = (mode == TITLE) ? 0 : (gameOver ? 2 : 1);   // 0=title 1=playing 2=over
+  int sc = snakeLen - 3; if (sc < 0) sc = 0; if (sc > 255) sc = 255;
+  buf[1] = (uint8_t)sc;
+  buf[2] = (uint8_t)foodCol;
+  buf[3] = (uint8_t)foodRow;
+  for (int i = 0; i < 12; i++) buf[4 + i] = 0;
+  if (mode == PLAYING) {
+    for (int i = 0; i < snakeLen; i++) {
+      int idx = bodyRow[i] * W + bodyCol[i];
+      buf[4 + idx / 8] |= (uint8_t)(1 << (idx % 8));
+    }
+  }
+  statusChar.writeValue(buf, 16);                       // notifies subscribers
+}
+
 void onConnect(BLEDevice d)    { linked = true; mode = TITLE; }
 void onDisconnect(BLEDevice d) { linked = false; }
 
@@ -138,6 +160,7 @@ void setup() {
   BLE.setDeviceName("SnakeR4");
   BLE.setAdvertisedService(snakeSvc);
   snakeSvc.addCharacteristic(inputChar);
+  snakeSvc.addCharacteristic(statusChar);
   BLE.addService(snakeSvc);
   BLE.setEventHandler(BLEConnected, onConnect);
   BLE.setEventHandler(BLEDisconnected, onDisconnect);
@@ -155,6 +178,8 @@ void loop() {
     b[n] = 0;
     handleToken((char *)b);
   }
+
+  if (linked && millis() - lastStatus >= 100) { lastStatus = millis(); updateStatus(); }
 
   if (!linked) { renderWaiting(); delay(20); return; }
 

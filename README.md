@@ -1,193 +1,148 @@
-# CAN_Takeover — Controller → Arduino UNO R4 WiFi (Snake demo)
+# CAN_Takeover
 
-A game controller drives a **Snake** game on the Arduino UNO R4 WiFi's 12×8 LED
-matrix, plus a live **controller GUI** on the laptop. Input is read on the laptop
-and sent to the R4 — over **USB serial** or **BLE**.
+Workbench for driving an **Arduino UNO R4 WiFi** — the long-term goal is controlling
+an **OpenArm 1.0** (DAMIAO motors) over **CAN 2.0**, and along the way a full set of
+**game-controller → Snake** demos were built to work out the input/wireless plumbing.
 
-This started as the CAN/OpenArm robot-arm project (see `MEMORY`/hardware notes);
-this folder is the controller-input + display demo built along the way.
-
----
-
-## TL;DR
-
-```bash
-# one-time: install arduino-cli + board core + libs
-bash install_arduino_cli.sh
-
-# flash the R4 (BLE) + launch the controller GUI  (run from a NATIVE terminal)
-bash flash_and_run.sh
-```
-
-The R4 boots, advertises over BLE as **`SnakeR4`**, the GUI window pops up,
-auto-detects your controller, highlights presses, and forwards them to the R4.
-The **USB-C cable is then only power + flashing.**
+Everything here falls into four buckets:
+1. **Arduino sketches** (`*/`*.ino`) — run on the R4.
+2. **Flipper Zero app** (`flipper_snake/`) — a `.fap`.
+3. **Laptop programs** — read a controller and bridge it to the R4 (Python / C / HTML).
+4. **Setup & launcher scripts** (`*.sh`).
 
 ---
 
-## Why the laptop is in the loop (important)
+## Hardware facts (learned the hard way)
 
-The end goal was "controller talks straight to the Arduino, no laptop." After
-reverse-engineering the hardware, that is **not possible on the UNO R4**:
-
-- The R4's USB is **device-only** (no USB host) → can't read a wired controller.
-- The R4's ESP32-S3 radio is **BLE-only (no Bluetooth Classic)**, and `ArduinoBLE`
-  can't do the secure HID bonding a controller needs → can't host one over BLE.
-
-So a controller (8BitDo/PS5/Xbox) **cannot connect directly to the R4.** The
-laptop — a full Bluetooth/USB host — reads the controller and relays it. The R4
-is just a BLE **peripheral**.
-
-*Laptop-free options (future):* a **USB Host Shield** on the R4, or an
-**original ESP32 + Bluepad32** forwarding to the R4 over UART. See hardware notes.
+- **UNO R4 WiFi** = Renesas RA4M1 (runs your sketch) + ESP32‑S3 (WiFi/BLE radio) + 12×8 LED matrix.
+- **Native CAN is on D10 (CANTX) / D13 (CANRX)** — classic **CAN 2.0 only**, and needs an **external transceiver** (D10/D13 are logic, not the bus). No CAN‑FD natively.
+- **The R4 cannot host a game controller directly.** Its USB is device‑only (no USB host) and `ArduinoBLE` can't do the encrypted pairing/bonding a real controller (Xbox/PS5) requires. Its radio *can* do plain BLE central (proven with the Flipper), just not controller HID hosting. → controllers go through the **laptop** or an **ESP32 + Bluepad32**.
+- **The ESP32‑S3 radio is a locked co‑processor.** A **reflash or the reset button only resets the RA4M1** — if BLE gets wedged, you must **fully unplug USB‑C** to reset the radio.
+- **BLE needs the ESP32‑S3 firmware that supports it** — if a sketch scrolls `BLE?`, update it once via Arduino IDE → **Tools → Firmware Updater**.
+- **VS Code here is a snap** — its integrated terminal blocks `/dev/input`, serial, BLE, FUSE. **Run everything from a native terminal.**
 
 ---
 
-## Architecture
+## How controller input reaches the game (the transports)
 
-```
-controller ──(USB or Bluetooth)──> laptop ──(USB serial OR BLE)──> R4 ──> LED matrix
-            read via evdev          relay                          snake game
-```
+| Transport | Reads controller | Sends to R4 | R4 sketch | USB‑C is… |
+|---|---|---|---|---|
+| **USB serial** | laptop (`evdev`) | USB serial | `snake_led` | power + data |
+| **BLE (R4 = peripheral)** | laptop (`evdev`) | BLE (bleak) | `snake_ble` | **power only** |
+| **Flipper** | Flipper buttons | BLE (Flipper=peripheral) | `snake_flipper` | power only |
+| **Web (Gamepad API)** | browser | localhost bridge → serial/BLE | `snake_led`/`snake_ble` | depends |
 
-Two interchangeable transports laptop→R4:
-
-| Transport | Laptop script        | R4 sketch          | USB-C is…        |
-|-----------|----------------------|--------------------|------------------|
-| USB serial| `controller_to_arduino.py` | `snake_led`  | power + data     |
-| **BLE**   | `controller_gui.py` / `controller_to_ble.py` | `snake_ble` | **power + flash only** |
+Shared **token protocol** (newline‑terminated): `^ v < >` = directions, `A` = start/restart,
+`STR` = Start. The R4 reads the last char for direction.
 
 ---
 
-## Files
+## Arduino sketches
+
+| Folder | What it does |
+|---|---|
+| `Blink/` | Stock blink — smoke test that uploading works. |
+| `controller_led/` | Shows the **last input** on the LED matrix (letters for buttons, arrows for sticks). Input over **USB serial**. |
+| `snake_led/` | **Snake** on the matrix, controlled over **USB serial**. Title screen → OK/A starts, d‑pad/sticks steer. |
+| `snake_ble/` | Snake with the **R4 as a BLE peripheral** (`SnakeR4`); the laptop connects as central and writes tokens. Also broadcasts a 16‑byte **game‑status** notify (score + snake bitmap) for the web mirror. |
+| `snake_flipper/` | Snake with the **R4 as a BLE central** that connects to the **Flipper** (which advertises 16‑bit UUID `0xF00D`) and subscribes to its token characteristic. Has serial debug + `BLE.begin()` retry. |
+
+Build/flash any of them with `arduino-cli` (FQBN `arduino:renesas_uno:unor4wifi`) or the IDE.
+
+---
+
+## Flipper Zero app — `flipper_snake/`
+
+A FAP that makes the **Flipper a BLE peripheral** so the Arduino (`snake_flipper`) connects to it
+(the Flipper can't be a BLE central). The Flipper's d‑pad/OK stream tokens to the Arduino; the
+screen shows which buttons you press.
 
 | File | Role |
-|------|------|
-| `snake_ble/snake_ble.ino` | **R4 = BLE peripheral** `SnakeR4`; snake on the matrix; input via a writable BLE characteristic. |
-| `snake_led/snake_led.ino` | R4 snake driven over **USB serial** (no BLE). |
-| `controller_led/controller_led.ino` | Shows the last button/stick as text/arrows on the matrix (USB serial). |
-| `controller_gui.py` | **Laptop GUI** (pygame): auto-detects the pad, draws it, highlights presses, and forwards to the R4 over BLE (bleak). |
-| `controller_to_ble.py` | Headless laptop→R4 **BLE** bridge (no GUI). |
-| `controller_to_arduino.py` | Headless laptop→R4 **USB-serial** bridge. |
-| `controller_cui.c` | **Pure-C console UI** (no deps): auto-detects the pad, draws it in the terminal with live highlights, forwards over **USB serial** to `snake_led`. |
-| `install_openarm.sh` | **One-shot installer** for the whole stack: Arduino IDE + arduino-cli + R4 core/libs, `can-utils`+`python-can`, controller libs (evdev/bleak/pygame/pyserial), bluez, groups. `--lerobot` adds the OpenArm/LeRobot Python stack. |
-| `install_arduino_cli.sh` | Just `arduino-cli` + UNO R4 core + `ArduinoGraphics` + `ArduinoBLE` (subset of the above). |
-| `flash_and_run.sh` | Compiles+flashes `snake_ble`, sets up the Python venv, launches `controller_gui.py` (pygame GUI, BLE). |
-| `run_cui.sh` | Builds `controller_cui.c`, flashes `snake_led`, runs the C console UI (serial). |
+|---|---|
+| `application.fam` | Build manifest (name, category, stack size). |
+| `flipper_snake.c` | GUI + input: draws the d‑pad/OK, highlights presses, sends tokens, exits cleanly (stops advertising = "forgets" the Arduino). |
+| `ble_snake.c` / `.h` | Custom BLE peripheral: advertises `0xF00D`, one NOTIFY characteristic (`9a1e0002`) for tokens, via `bt_profile_start` / `bt_profile_restore_default`. |
+| `dist/flipper_snake.fap` | Built app (produced by `ufbt`). |
+
+Build with **`ufbt`** (see `build_antimicrox`/tooling notes below). Installs to the Flipper SD at
+`apps/Bluetooth/flipper_snake.fap`; `ufbt launch` builds+installs+runs it.
+> Known cosmetic bug: the screen says "advertising" even when connected (the bt‑service status
+> callback doesn't report "connected" for a custom profile). Gameplay still works.
 
 ---
 
-## Setup
+## Laptop programs
 
-### Arduino side
-```bash
-bash install_arduino_cli.sh
-```
-Installs `arduino-cli` to `~/.local/bin`, the `arduino:renesas_uno` core, and the
-`ArduinoGraphics` + `ArduinoBLE` libraries.
+**Read a controller and bridge it to the R4 / visualize it.**
 
-> **BLE firmware:** the R4's ESP32-S3 needs connectivity firmware with BLE enabled.
-> If the matrix scrolls **`BLE?`** at boot, update it once via the Arduino IDE:
-> **Tools → Firmware Updater**.
-
-### Laptop side
-`flash_and_run.sh` builds a venv automatically. Manually it's:
-```bash
-sudo apt install bluez
-python3 -m venv ~/snakepad-venv
-~/snakepad-venv/bin/pip install bleak evdev pygame
-```
-
-### Permissions (one-time)
-```bash
-sudo usermod -aG dialout,input $USER   # serial + /dev/input access; then log out/in
-```
-
-> **Run scripts from a NATIVE terminal** (GNOME Terminal/Console) — the VS Code
-> **snap** terminal blocks `/dev/input`, serial, BLE, and FUSE.
+| File | Role |
+|---|---|
+| `controller_to_arduino.py` | Headless bridge: 8BitDo via `evdev` → **USB serial** → `snake_led`. |
+| `controller_to_ble.py` | Headless bridge: controller → **BLE** (bleak) → `snake_ble` (R4 peripheral). |
+| `controller_gui.py` | **pygame** window: draws the controller + live highlights, forwards over BLE. (pygame can be hard to install on new Python — the web/CUI options avoid it.) |
+| `controller_cui.c` | **Pure‑C console UI**: draws the controller in the terminal (ANSI), forwards over **USB serial**. No deps. Build: `gcc -O2 -o controller_cui controller_cui.c`. |
+| `controller_web.html` | Browser **Gamepad API** visualizer (dualshock‑tools style) + posts tokens to `/send` + shows a live **snake‑board mirror** from `/status`. |
+| `web_bridge.py` | Serves `controller_web.html` and forwards POSTed tokens over **USB serial**. |
+| `web_bridge_ble.py` | Serves the page, forwards tokens over **BLE**, and exposes the R4's game status at `/status`. |
+| `controller_cui` | Compiled binary of `controller_cui.c`. |
 
 ---
 
-## Connect the controller to the laptop (Ubuntu 26.04, Bluetooth)
+## Setup / install scripts
 
-The 8BitDo pairs to the **laptop** (a real Bluetooth host) — not to the Arduino.
+| Script | What it installs |
+|---|---|
+| `install_arduino_cli.sh` | `arduino-cli` + UNO R4 core + `ArduinoGraphics` + `ArduinoBLE`. |
+| `install_openarm.sh` | Everything for the OpenArm project: Arduino **IDE** + arduino‑cli + core/libs, `can-utils` + `python-can`, controller libs (evdev/bleak/pygame/pyserial) in `~/openarm-venv`, bluez, groups. `--lerobot` adds the LeRobot stack. |
+| `build_antimicrox.sh` | Installs Qt6/SDL2 deps and builds the AntiMicroX fork in `~/antimicrox` (a GUI controller mapper we forked; superseded by `controller_web.html`). |
 
-**1. Put the controller in Bluetooth pairing mode.**
-For an 8BitDo in Xbox/XInput mode: power on by holding **Start**, then hold the
-small **pair** button (top edge) for ~3 s until the LEDs **fast-blink**.
-
-**2a. GUI way — GNOME Settings:**
-- Open **Settings → Bluetooth** (Bluetooth on).
-- Pick the controller from the list → it pairs and connects.
-
-**2b. CLI way — `bluetoothctl`:**
-```bash
-bluetoothctl
-power on
-agent on
-default-agent
-scan on                 # wait for the pad; note its MAC (XX:XX:XX:XX:XX:XX)
-pair  XX:XX:XX:XX:XX:XX
-trust XX:XX:XX:XX:XX:XX  # auto-reconnect next time
-connect XX:XX:XX:XX:XX:XX
-scan off
-exit
-```
-
-**3. Verify it's seen:**
-```bash
-sudo evtest        # should list the controller; pick it and watch events
-# or:
-ls /dev/input/by-id/ | grep -i pad
-```
-
-USB also works — just plug it in; `evdev` reads it identically and no pairing is
-needed.
+**Flipper tooling** (not a script here): `pipx install ufbt` then `pipx inject ufbt scons`, then
+`ufbt` (build) / `ufbt launch` (deploy). Builds against official firmware API; loads on Momentum too.
 
 ---
 
-## Run
+## Launcher scripts
 
-```bash
-bash flash_and_run.sh                  # auto-detects R4 port, or:
-bash flash_and_run.sh /dev/ttyACM0
-```
+| Script | Runs |
+|---|---|
+| `flash_and_run.sh` | Flash `snake_ble` (BLE) + launch `controller_gui.py`. |
+| `run_cui.sh` | Build `controller_cui.c`, flash `snake_led`, run the C console UI (serial). |
+| `gui.sh` | Serve `controller_web.html` on localhost + open the browser (pure visualizer). Grants snap browsers gamepad access. Ctrl+C stops it. |
+| `snake_gui.sh` | Web snake over **USB serial**: flash `snake_led`, run `web_bridge.py`, open browser. |
+| `snake_gui_ble.sh` | Web snake over **BLE** (USB‑C power‑only): flash `snake_ble`, run `web_bridge_ble.py` (with live board mirror), open browser. |
+| `stop_gui.sh` | Stop the localhost web server / bridge (any of the above). |
+| `run_openarm.sh` | Bring up **CAN FD** SocketCAN (1M/5M), activate the venv, open the Rerun web viewer, print the `lerobot-teleoperate` command. |
 
-1. R4 flashes, reboots, advertises `SnakeR4` → matrix blinks **four corners**.
-2. GUI window opens, finds the controller, shows live highlights; status line
-   shows `R4: connected` once linked.
-3. Press **Start/A** → the snake game begins on the R4's matrix.
-4. **Controls:** d-pad or either stick = steer; **A** = restart after game over.
-
-### USB-serial fallback (no BLE)
-```bash
-~/.local/bin/arduino-cli upload -p /dev/ttyACM0 --fqbn arduino:renesas_uno:unor4wifi snake_led
-~/snakepad-venv/bin/python controller_to_arduino.py
-```
-
-### Pure-C console UI (no Python, no pygame)
-```bash
-bash run_cui.sh            # builds controller_cui.c, flashes snake_led, runs it
-```
-Reads the controller and draws it in the terminal with live button highlights,
-forwarding over USB serial. Build manually with:
-`gcc -O2 -o controller_cui controller_cui.c`.
-Note: this path uses USB serial, so the cable carries data (not power-only).
-A pure-C **BLE** version would require a BlueZ D-Bus GATT client (much larger);
-for power-only BLE without pygame, use the headless `controller_to_ble.py`.
+All launchers assume a **native terminal**; the web/BLE ones prefer `~/openarm-venv` or `~/snakepad-venv`.
 
 ---
 
-## Token protocol (laptop → R4)
+## Quick starts
 
-Short ASCII strings; the R4 reads the **last char** for direction:
+**Snake, controller wired to laptop, over USB serial (simplest):**
+```bash
+bash run_cui.sh            # or: snake_gui.sh for the browser UI
+```
 
-| Token | Meaning |
-|-------|---------|
-| `^ v < >` | up / down / left / right (sent as `D^`, `L^`, `R>`, … — prefix = source) |
-| `A` | A button (start / restart) |
-| `STR` | Start button |
-| `B X Y LB RB L3 R3 …` | other buttons (snake ignores; `controller_led` shows them) |
+**Snake, wireless (controller BT→laptop, laptop BLE→R4, USB‑C power‑only):**
+```bash
+bash snake_gui_ble.sh      # needs snake_ble flashed + R4 BLE firmware
+```
+
+**Snake from the Flipper (no laptop in the loop):**
+```bash
+# Flipper: build + install the FAP
+cd ~/CAN_Takeover/flipper_snake && ufbt launch
+# Arduino: flash snake_flipper, then open ARD Snake on the Flipper
+arduino-cli upload -p /dev/ttyACM0 --fqbn arduino:renesas_uno:unor4wifi snake_flipper
+# If the Arduino won't connect: FULLY unplug/replug its USB-C (resets the radio)
+```
+
+**OpenArm over CAN FD from the laptop:**
+```bash
+bash install_openarm.sh --lerobot
+bash run_openarm.sh
+```
 
 ---
 
@@ -195,19 +150,15 @@ Short ASCII strings; the R4 reads the **last char** for direction:
 
 | Symptom | Fix |
 |---|---|
-| Matrix scrolls **`BLE?`** | Update R4 WiFi/BLE firmware: IDE → Tools → **Firmware Updater**. |
-| GUI: "No controller found" | Pair/plug the pad first; check `sudo evtest`; be in `input` group. |
-| GUI: `R4: not found` | R4 not powered / not running `snake_ble` / still flashing. |
-| `Permission denied` on `/dev/ttyACM0` | Join `dialout`, log out/in. |
-| Nothing works from VS Code terminal | Use a **native** terminal (snap confinement). |
-| `arduino-cli: not found` | Run `bash install_arduino_cli.sh` (adds `~/.local/bin` to PATH). |
+| Matrix scrolls `BLE?` | R4 BLE firmware missing → IDE → Tools → Firmware Updater. |
+| Arduino BLE won't connect after a reset/reflash | Radio wedged — **fully unplug USB‑C** ~10 s, replug (reset button won't do it). |
+| `Permission denied` on `/dev/ttyACM*` | Join `dialout` group, log out/in. |
+| Controller / GUI dead, or FUSE errors | You're in the VS Code **snap** terminal — use a native one. |
+| Browser page never sees the pad | Snap browser — `sudo snap connect firefox:joystick` (gui.sh does this). |
+| `arduino-cli`/`ufbt` not found | New shell or `source ~/.bashrc`. |
 
 ---
 
-## Hardware notes
-
-- **Board:** Arduino UNO R4 WiFi (RA4M1 + ESP32-S3). 12×8 LED matrix is on the R4.
-- **Controller:** 8BitDo in Xbox-360/XInput mode (USB vendor `0x3537`); Classic BT
-  when wireless.
-- The broader project targets controlling **OpenArm / DAMIAO** motors over **CAN
-  2.0** from the R4 — see the CAN/hardware notes for that side.
+## Reference photos
+`*.jpeg`, `img_*.jpg`, `ArduinoCANport.jpeg` — hardware shots (CAN adapter, DAMIAO connectors,
+motor, Xbox controller box) referenced during setup.

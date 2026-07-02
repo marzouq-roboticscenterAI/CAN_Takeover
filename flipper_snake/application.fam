@@ -1,0 +1,11 @@
+App(
+    appid="flipper_snake",
+    name="ARD Snake",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="flipper_snake_app",
+    stack_size=8 * 1024,
+    fap_category="Bluetooth",
+    fap_author="you",
+    fap_version="0.1",
+    fap_description="Controls the Arduino snake over BLE (Flipper = peripheral).",
+)

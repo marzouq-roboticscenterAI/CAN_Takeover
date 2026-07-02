@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Controller — live inputs</title>
+<style>
+  :root { --bg:#12141a; --panel:#1b1e27; --edge:#3a3f4d; --txt:#d6dae4; --dim:#8b93a7; --acc:#f5b942; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--txt);
+              font-family: system-ui, "DejaVu Sans", sans-serif; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 18px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  #status { color: var(--dim); margin-bottom: 10px; min-height: 20px; }
+  #status.on { color: #5ad17a; }
+  canvas { background: var(--panel); border: 1px solid var(--edge); border-radius: 14px; width: 100%; height: auto; }
+  #raw { margin-top: 12px; font: 12px/1.5 monospace; color: var(--dim); white-space: pre-wrap; }
+  .hint { color: var(--dim); font-size: 13px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Controller — live inputs</h1>
+  <div id="status">Press any button on the controller to connect…</div>
+  <canvas id="cv" width="820" height="460"></canvas>
+  <div id="raw"></div>
+  <h2 style="font-size:16px; margin:16px 0 6px">Arduino Snake (live)
+    <span id="snakeState" style="color:var(--dim); font-weight:normal"></span></h2>
+  <canvas id="board" width="252" height="172"></canvas>
+  <div class="hint">Uses the browser Gamepad API. Works in Chrome or Firefox. The pad only
+    appears after you press a button (a browser privacy rule). Standard (XInput) mapping.</div>
+</div>
+<script>
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const statusEl = document.getElementById('status');
+const rawEl = document.getElementById('raw');
+let padIndex = null;
+
+// ---- token forwarding to the Arduino via the local bridge (/send) ----
+const TH = 0.6;
+const lastDir = { D:null, L:null, R:null };
+const lastBtn = { A:false, S:false };
+function sendToken(t){ fetch('/send',{method:'POST',body:t}).catch(()=>{}); }
+function axDir(x,y){
+  if (Math.abs(y) >= Math.abs(x) && Math.abs(y) > TH) return y < 0 ? '^' : 'v';
+  if (Math.abs(x) > TH) return x < 0 ? '<' : '>';
+  return null;
+}
+function processTokens(gp){
+  const bp = i => gp.buttons[i] && gp.buttons[i].pressed;
+  const av = i => gp.axes.length > i ? gp.axes[i] : 0;
+  const dd = bp(12)?'^':bp(13)?'v':bp(14)?'<':bp(15)?'>':null;   // d-pad
+  if (dd !== lastDir.D){ lastDir.D = dd; if (dd) sendToken('D'+dd); }
+  const ld = axDir(av(0),av(1));                                  // left stick
+  if (ld !== lastDir.L){ lastDir.L = ld; if (ld) sendToken('L'+ld); }
+  const rd = axDir(av(2),av(3));                                  // right stick
+  if (rd !== lastDir.R){ lastDir.R = rd; if (rd) sendToken('R'+rd); }
+  const a = bp(0); if (a && !lastBtn.A) sendToken('A');   lastBtn.A = a;   // A -> start/restart
+  const s = bp(9); if (s && !lastBtn.S) sendToken('STR'); lastBtn.S = s;   // Start
+}
+
+const COL = { body:'#2c303a', edge:'#5a606e', dim:'#3c4150', txt:'#d6dae4', hl:'#ffffff', acc:'#f5b942',
+              A:'#3cc85a', B:'#dc4646', X:'#4682e6', Y:'#e6c83c' };
+
+addEventListener('gamepadconnected', e => { padIndex = e.gamepad.index; setStatus(e.gamepad); });
+addEventListener('gamepaddisconnected', e => {
+  if (padIndex === e.gamepad.index) { padIndex = null; statusEl.textContent = 'Controller disconnected.'; statusEl.className=''; }
+});
+function setStatus(gp){ statusEl.textContent = 'Connected: ' + gp.id + (gp.mapping==='standard'?'  (standard mapping)':'  (non-standard mapping)'); statusEl.className='on'; }
+
+function pad() {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  if (padIndex !== null && pads[padIndex]) return pads[padIndex];
+  for (const p of pads) if (p) { padIndex = p.index; setStatus(p); return p; }
+  return null;
+}
+
+// ---- drawing helpers ----
+function circle(x,y,r){ ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fill(); }
+function ring(x,y,r,w){ ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.lineWidth=w; ctx.stroke(); }
+function rrect(x,y,w,h,r){ ctx.beginPath(); ctx.roundRect(x,y,w,h,r); }
+
+function faceBtn(x,y,r,color,pressed,label){
+  ctx.fillStyle = pressed ? color : COL.dim; circle(x,y,r);
+  ctx.strokeStyle = pressed ? COL.hl : color; ring(x,y,r,2);
+  ctx.fillStyle = pressed ? COL.hl : COL.txt; ctx.font='bold 16px system-ui';
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(label,x,y);
+}
+function pill(x,y,w,h,pressed,label){
+  ctx.fillStyle = pressed ? COL.acc : COL.dim; rrect(x,y,w,h,8); ctx.fill();
+  ctx.strokeStyle = COL.edge; ctx.lineWidth=2; rrect(x,y,w,h,8); ctx.stroke();
+  ctx.fillStyle = pressed ? '#141414' : COL.txt; ctx.font='bold 13px system-ui';
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(label,x+w/2,y+h/2);
+}
+function trigger(x,y,val,label){
+  const w=90,h=16;
+  ctx.fillStyle=COL.dim; rrect(x,y,w,h,6); ctx.fill();
+  ctx.fillStyle=COL.acc; rrect(x,y,Math.max(0,Math.min(1,val))*w,h,6); ctx.fill();
+  ctx.strokeStyle=COL.edge; ctx.lineWidth=2; rrect(x,y,w,h,6); ctx.stroke();
+  ctx.fillStyle=COL.txt; ctx.font='12px system-ui'; ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText(label, x+w+8, y+h/2);
+}
+function stick(cx,cy,ax,ay,pressed){
+  const outer=48, off=outer-18;
+  ctx.fillStyle=COL.dim; circle(cx,cy,outer);
+  ctx.strokeStyle=COL.edge; ring(cx,cy,outer,2);
+  const kx=cx+ax*off, ky=cy+ay*off;
+  ctx.fillStyle = pressed ? COL.acc : '#969cac'; circle(kx,ky,17);
+  ctx.strokeStyle=COL.hl; ring(kx,ky,17,2);
+}
+function dpad(cx,cy,u,d,l,r){
+  const a=28,w=20;
+  const seg=(x,y,ww,hh,on)=>{ ctx.fillStyle=on?COL.acc:COL.dim; ctx.fillRect(x,y,ww,hh);
+                              ctx.strokeStyle=COL.edge; ctx.lineWidth=1; ctx.strokeRect(x,y,ww,hh); };
+  seg(cx-w/2, cy-a, w, a, u); seg(cx-w/2, cy, w, a, d);
+  seg(cx-a, cy-w/2, a, w, l); seg(cx, cy-w/2, a, w, r);
+}
+
+function draw(){
+  const gp = pad();
+  ctx.clearRect(0,0,cv.width,cv.height);
+  ctx.fillStyle=COL.body; rrect(70,95,680,300,42); ctx.fill();
+  ctx.strokeStyle=COL.edge; ctx.lineWidth=2; rrect(70,95,680,300,42); ctx.stroke();
+
+  const b = i => gp && gp.buttons[i] ? gp.buttons[i] : {pressed:false,value:0};
+  const ax = i => gp && gp.axes.length>i ? gp.axes[i] : 0;
+
+  if (gp) processTokens(gp);   // forward direction/A tokens to the snake
+
+  trigger(130,60, b(6).value, 'LT');
+  trigger(540,60, b(7).value, 'RT');
+  pill(130,95,90,22, b(4).pressed, 'LB');
+  pill(560,95,90,22, b(5).pressed, 'RB');
+
+  stick(180,190, ax(0), ax(1), b(10).pressed);
+  stick(480,300, ax(2), ax(3), b(11).pressed);
+  dpad(300,300, b(12).pressed, b(13).pressed, b(14).pressed, b(15).pressed);
+
+  const cx=580, cy=210, g=40;
+  faceBtn(cx, cy+g, 22, COL.A, b(0).pressed, 'A');
+  faceBtn(cx+g, cy, 22, COL.B, b(1).pressed, 'B');
+  faceBtn(cx-g, cy, 22, COL.X, b(2).pressed, 'X');
+  faceBtn(cx, cy-g, 22, COL.Y, b(3).pressed, 'Y');
+
+  faceBtn(345,180,12,'#969cac', b(8).pressed, '');   // Back/Select
+  faceBtn(415,180,12,'#969cac', b(9).pressed, '');   // Start
+  faceBtn(380,150,14,'#969cac', b(16)? b(16).pressed:false, ''); // Guide
+
+  // raw readout
+  if (gp) {
+    const pressed = gp.buttons.map((bt,i)=>bt.pressed?i:null).filter(v=>v!==null);
+    rawEl.textContent =
+      'buttons pressed: [' + pressed.join(', ') + ']\n' +
+      'axes: ' + gp.axes.map(a=>a.toFixed(2)).join('  ');
+  } else {
+    rawEl.textContent = '';
+  }
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+// ---- live snake board mirror (polls /status from the BLE bridge) ----
+const board = document.getElementById('board');
+const bctx = board.getContext('2d');
+const snakeStateEl = document.getElementById('snakeState');
+const CW=12, CH=8, CS=20, PADX=6, PADY=6;
+const STATE_TXT = ['— title', '— playing', '— game over'];
+function drawBoard(s){
+  bctx.fillStyle='#0f1116'; bctx.fillRect(0,0,board.width,board.height);
+  for (let r=0;r<CH;r++) for (let c=0;c<CW;c++){
+    bctx.fillStyle='#1b1e27'; bctx.fillRect(PADX+c*CS+1, PADY+r*CS+1, CS-2, CS-2);
+  }
+  if (!s || s.state===undefined){ snakeStateEl.textContent='(waiting for R4)'; return; }
+  snakeStateEl.textContent = (STATE_TXT[s.state]||'') + '   score ' + (s.score||0);
+  if (s.food){ bctx.fillStyle='#f5b942'; bctx.fillRect(PADX+s.food[0]*CS+1, PADY+s.food[1]*CS+1, CS-2, CS-2); }
+  bctx.fillStyle='#5ad17a';
+  (s.snake||[]).forEach(p => bctx.fillRect(PADX+p[0]*CS+1, PADY+p[1]*CS+1, CS-2, CS-2));
+}
+async function pollStatus(){
+  try { const r = await fetch('/status'); if (r.ok) drawBoard(await r.json()); } catch(e){}
+}
+drawBoard(null);
+setInterval(pollStatus, 150);
+</script>
+</body>
+</html>
