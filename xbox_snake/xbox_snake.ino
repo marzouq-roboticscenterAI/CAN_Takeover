@@ -133,7 +133,7 @@ void step() {
 void renderGame() {
   clearFrame();
   for (int i = 0; i < snakeLen; i++) frame[bodyRow[i]][bodyCol[i]] = 1;
-  if ((millis() / 200) % 2 == 0) frame[foodRow][foodCol] = 1;
+  frame[foodRow][foodCol] = 1;   // food stays solid (no blink)
   matrix.renderBitmap(frame, H, W);
 }
 void renderTitle() {

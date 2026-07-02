@@ -56,6 +56,11 @@ For `xbox_snake` use **`flash_xbox_snake.sh`** (it checks the patch first).
 
 ## Direct Xbox pairing (`xbox_snake/`)
 
+> **Note:** Claude (the assistant that built this) initially concluded this was *impossible* —
+> that `ArduinoBLE` simply couldn't do the encrypted pairing an Xbox controller needs. After the
+> user pushed back, digging in proved otherwise: the crypto was all there, only the central‑side
+> initiator was missing. Patching that in made direct pairing work. Lesson kept here on purpose.
+
 The R4 pairs with an **Xbox Wireless (BLE) controller** on its own and reads the buttons —
 no laptop and no ESP32 bridge. This required two things:
 
